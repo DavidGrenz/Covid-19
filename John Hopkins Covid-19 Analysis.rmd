@@ -1,0 +1,302 @@
+---
+title: "COVID-19 Case Trends in California, Nevada, and the United States"
+author: "David Grenz"
+date: "04/18/2026"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(broom)
+```
+
+# Introduction
+
+## Question of Interest
+
+This report analyzes COVID-19 case patterns in the United States using the Johns Hopkins CSSE time series data. The main question of interest is:
+
+How did COVID-19 case rates change over time in California, Nevada, and the United States as a whole, how did the four major U.S. Census regions compare, and is Nevada's case rate associated with California's case rate when California is lagged by one or two weeks?
+
+This question is meaningful because Nevada's economy is heavily tied to tourism, and a large share of tourists visiting Las Vegas and Reno come from California. Because of that connection, it is reasonable to ask whether large COVID-19 waves in California were associated with later increases in Nevada.
+
+## Data Source
+
+The data come from the Johns Hopkins University Center for Systems Science and Engineering (JHU CSSE) COVID-19 time series repository on GitHub. The analysis below uses the U.S. confirmed cases file and the U.S. deaths file. The deaths file is also used because it contains population counts, which allow case rates to be calculated per 100,000 residents.
+
+## Data Description
+
+The two source files are:
+
+- `time_series_covid19_confirmed_US.csv`
+- `time_series_covid19_deaths_US.csv`
+
+Each row represents a U.S. county or county-equivalent. The columns at the front of the dataset contain geographic identifiers such as county and state names. The remaining date columns contain cumulative COVID-19 counts for each day.
+
+# Load the Data
+
+```{r import-data}
+base_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+
+confirmed_url <- paste0(base_url, "time_series_covid19_confirmed_US.csv")
+deaths_url    <- paste0(base_url, "time_series_covid19_deaths_US.csv")
+
+confirmed_us <- read_csv(confirmed_url)
+deaths_us <- read_csv(deaths_url)
+```
+
+# Tidy and Merge the Data
+
+```{r tidy-data}
+confirmed_long <- confirmed_us %>%
+  pivot_longer(
+    cols = matches("^[0-9]{1,2}/[0-9]{1,2}/[0-9]{2}$"),
+    names_to = "date",
+    values_to = "confirmed"
+  ) %>%
+  mutate(date = mdy(date))
+
+deaths_long <- deaths_us %>%
+  pivot_longer(
+    cols = matches("^[0-9]{1,2}/[0-9]{1,2}/[0-9]{2}$"),
+    names_to = "date",
+    values_to = "deaths"
+  ) %>%
+  mutate(date = mdy(date))
+```
+
+```{r join-data}
+covid_us_long <- confirmed_long %>%
+  left_join(
+    deaths_long %>%
+      select(Admin2, Province_State, date, Population, deaths),
+    by = c("Admin2", "Province_State", "date")
+  ) %>%
+  filter(!is.na(Population), Population > 0, !is.na(Province_State))
+```
+
+# Add Census Region Labels
+
+```{r add-region}
+northeast <- c("Maine", "New Hampshire", "Vermont", "Massachusetts", "Rhode Island",
+               "Connecticut", "New York", "New Jersey", "Pennsylvania", "Delaware", "Maryland", "District of Columbia", "Virginia", "West Virginia")
+midwest <- c("Ohio", "Indiana", "Illinois", "Michigan", "Wisconsin", "Minnesota",
+             "Iowa", "Missouri", "North Dakota", "South Dakota", "Nebraska", "Kansas")
+south <- c("North Carolina", "South Carolina", "Georgia", "Florida", "Kentucky",
+           "Tennessee", "Mississippi", "Alabama", "Oklahoma", "Texas", "Arkansas",
+           "Louisiana")
+west <- c("Montana", "Idaho", "Wyoming", "Colorado", "New Mexico", "Arizona", "Utah",
+          "Nevada", "Washington", "Oregon", "California", "Alaska", "Hawaii")
+
+covid_us_long <- covid_us_long %>%
+  mutate(
+    region = case_when(
+      Province_State %in% northeast ~ "Northeast",
+      Province_State %in% midwest ~ "Midwest",
+      Province_State %in% south ~ "South",
+      Province_State %in% west ~ "West",
+      TRUE ~ "Other"
+    )
+  )
+```
+
+# Create Daily New Cases
+
+The Johns Hopkins data are cumulative counts. To analyze changes over time, I convert them to daily new cases by taking differences within each county.
+
+```{r daily-cases}
+covid_daily <- covid_us_long %>%
+  arrange(Province_State, Admin2, date) %>%
+  group_by(Province_State, Admin2) %>%
+  mutate(
+    new_cases = confirmed - lag(confirmed, default = first(confirmed))
+  ) %>%
+  ungroup() %>%
+  mutate(
+    new_cases = if_else(new_cases < 0, 0, new_cases)
+  )
+```
+
+# Aggregate to Weekly State Data
+
+I use weekly totals so that it is possible to examine one-week and two-week lag relationships between California and Nevada.
+
+```{r weekly-state}
+weekly_state <- covid_daily %>%
+  mutate(week = floor_date(date, unit = "week", week_start = 1)) %>%
+  group_by(Province_State, region, week) %>%
+  summarise(
+    weekly_cases = sum(new_cases, na.rm = TRUE),
+    population = sum(Population, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    case_rate_100k = weekly_cases / population * 100000
+  )
+```
+
+# Build California, Nevada, and U.S. Comparison Data
+
+```{r ca-nv-us-data}
+ca_nv <- weekly_state %>%
+  filter(Province_State %in% c("California", "Nevada")) %>%
+  select(week, series = Province_State, case_rate_100k)
+
+us_weekly <- covid_daily %>%
+  mutate(week = floor_date(date, unit = "week", week_start = 1)) %>%
+  group_by(week) %>%
+  summarise(
+    weekly_cases = sum(new_cases, na.rm = TRUE),
+    population = sum(Population, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    case_rate_100k = weekly_cases / population * 100000,
+    series = "United States"
+  ) %>%
+  select(week, series, case_rate_100k)
+
+compare_ca_nv_us <- bind_rows(ca_nv, us_weekly)
+```
+
+# Visualization 1: California, Nevada, and the National Average
+
+```{r plot-ca-nv-us, fig.width=10, fig.height=6}
+ggplot(compare_ca_nv_us, aes(x = week, y = case_rate_100k, color = series)) +
+  geom_line(linewidth = 1) +
+  labs(
+    title = "Weekly COVID-19 Case Rates: California, Nevada, and the United States",
+    subtitle = "Weekly new confirmed cases per 100,000 residents",
+    x = "Week",
+    y = "Cases per 100,000",
+    color = "Series"
+  ) +
+  scale_y_continuous(labels = comma) +
+  theme_minimal()
+```
+
+## Interpretation
+
+This visualization compares weekly COVID-19 case rates in California, Nevada, and the United States overall. It helps show whether Nevada tracked more closely with California than with the broader national pattern. If the two state lines tend to rise and fall together, that would support the idea that outbreaks in the two states were connected or at least exposed to some similar regional forces.
+
+# Visualization 2: Weekly Case Rates by U.S. Census Region
+
+```{r weekly-region}
+weekly_region <- weekly_state %>%
+  filter(region != "Other") %>%
+  group_by(region, week) %>%
+  summarise(
+    weekly_cases = sum(weekly_cases, na.rm = TRUE),
+    population = sum(population, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    case_rate_100k = weekly_cases / population * 100000
+  )
+```
+
+```{r plot-region, fig.width=10, fig.height=6}
+ggplot(weekly_region, aes(x = week, y = case_rate_100k, color = region)) +
+  geom_line(linewidth = 1) +
+  labs(
+    title = "Weekly COVID-19 Case Rates by U.S. Census Region",
+    subtitle = "Weekly new confirmed cases per 100,000 residents",
+    x = "Week",
+    y = "Cases per 100,000",
+    color = "Region"
+  ) +
+  scale_y_continuous(labels = comma) +
+  theme_minimal()
+```
+
+## Interpretation
+
+This figure compares the four major Census regions: Northeast, Midwest, South, and West. The regional trends make it easier to see how COVID-19 waves shifted geographically over time. A national summary alone would hide many of these differences.
+
+# Model: Does California Lead Nevada?
+
+To explore whether California's case rate is associated with Nevada's case rate later on, I create a weekly state-level dataset for the two states, then lag California by one week and two weeks.
+
+```{r lag-model-data}
+ca_weekly <- weekly_state %>%
+  filter(Province_State == "California") %>%
+  select(week, ca_rate = case_rate_100k)
+
+nv_weekly <- weekly_state %>%
+  filter(Province_State == "Nevada") %>%
+  select(week, nv_rate = case_rate_100k)
+
+lag_df <- nv_weekly %>%
+  left_join(ca_weekly, by = "week") %>%
+  arrange(week) %>%
+  mutate(
+    ca_rate_lag1 = lag(ca_rate, 1),
+    ca_rate_lag2 = lag(ca_rate, 2)
+  ) %>%
+  filter(!is.na(ca_rate_lag1), !is.na(ca_rate_lag2))
+```
+
+## Correlations
+
+```{r correlations}
+cor_lag1 <- cor(lag_df$nv_rate, lag_df$ca_rate_lag1, use = "complete.obs")
+cor_lag2 <- cor(lag_df$nv_rate, lag_df$ca_rate_lag2, use = "complete.obs")
+
+tibble(
+  lag = c("California lagged 1 week", "California lagged 2 weeks"),
+  correlation_with_nevada = c(cor_lag1, cor_lag2)
+)
+```
+
+## Linear Model
+
+```{r model}
+lag_model <- lm(nv_rate ~ ca_rate_lag1 + ca_rate_lag2, data = lag_df)
+summary(lag_model)
+tidy(lag_model)
+```
+
+## Model Interpretation
+
+This model tests whether Nevada's weekly case rate is associated with California's weekly case rate one week earlier and two weeks earlier. A positive coefficient would suggest that higher case activity in California tended to be followed by higher case activity in Nevada. This does not prove causation, but it is a useful way to measure whether the two states moved together over time with a delay.
+
+# Visualization for the Model
+
+```{r model-scatter, fig.width=10, fig.height=6}
+ggplot(lag_df, aes(x = ca_rate_lag1, y = nv_rate)) +
+  geom_point(alpha = 0.6, color = "steelblue") +
+  geom_smooth(method = "lm", se = FALSE, color = "darkred") +
+  labs(
+    title = "Nevada Weekly Case Rate vs California Weekly Case Rate Lagged 1 Week",
+    x = "California weekly cases per 100,000 (lagged 1 week)",
+    y = "Nevada weekly cases per 100,000"
+  ) +
+  theme_minimal()
+```
+
+# Bias and Limitations
+
+There are several possible sources of bias and limitation in this analysis.
+
+First, reported case counts are not the same as true infections. Many cases were never diagnosed, especially early in the pandemic when testing was less available.
+
+Second, testing access and reporting practices differed across states and counties. That means differences in measured case rates may partly reflect differences in detection rather than only differences in disease spread.
+
+Third, this analysis assumes that California tourism flows could contribute to Nevada exposure, but the data here do not directly measure travel behavior. The link between California and Nevada is a reasonable hypothesis, but the model does not directly prove that tourists caused later increases in Nevada cases.
+
+Fourth, weekly case rates in California and Nevada may both be driven by other factors at the same time, such as national surges, seasonal effects, new variants, public policy changes, or changing testing practices. Because of that, correlation should not be interpreted as causation.
+
+Finally, the Johns Hopkins repository was created for public health tracking, not specifically for causal modeling. It is very useful for descriptive analysis, but it has limitations for making strong causal claims.
+
+# Conclusion
+
+This report used the Johns Hopkins CSSE U.S. COVID-19 time series data to examine case trends with a focus on California, Nevada, and the broader U.S. pattern. The first visualization compared weekly case rates in California, Nevada, and the United States. The second compared weekly case rates across the four Census regions. Together, these figures showed that COVID-19 waves varied over time both nationally and regionally.
+
+The modeling section then tested whether Nevada's weekly case rate was associated with California's weekly case rate lagged by one and two weeks. This provides a simple way to explore whether the two states moved together over time with a short delay. While the model cannot prove a tourism-based causal relationship, it does give a reasonable and interpretable starting point for exploring that possibility.
+
