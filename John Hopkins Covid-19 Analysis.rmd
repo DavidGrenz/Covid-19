@@ -1,297 +1,166 @@
 ---
-title: "COVID-19 Case Trends in California, Nevada, and the United States"
-author: "Your Name"
-date: "`r Sys.Date()`"
-output:
-
-  html_document: default
+title: "NYPD Historical Shooting Data Analysis"
+output: pdf_document
 ---
+This notebook is a brief exploration of the NYPD Historical Shooting Data set.  It will focus on shooting related homocides and their patterns by precinct and in time.
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-
+# Loading Libraries
+```{r, setup, results = "hide", message = FALSE, warning = FALSE}
+# Load packages
+library(dplyr)
 library(tidyverse)
 library(lubridate)
-library(scales)
-library(broom)
+library(ggplot2)
+library(MASS)
+library(randomForest)
+# Crate project 'data' folder if it does not exist
+if (!dir.exists("data")) {
+  dir.create("data")
+}
 ```
+# Loading Data
+```{r, DATA-files, cache=TRUE}
+# Define the URL
+csv_url <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv"
 
-# Introduction
+# Define file path
+csv_file_path <- "data/rows.csv"
 
-## Question of Interest
+# Download CSV if it does not exist
+if (!file.exists(csv_file_path)) {
+  download.file(csv_url, csv_file_path)
+}
 
-This report analyzes COVID-19 case patterns in the United States using the Johns Hopkins CSSE time series data. The main question of interest is:
-
-How did COVID-19 case rates change over time in California, Nevada, and the United States as a whole, how did the four major U.S. Census regions compare, and is Nevada's case rate associated with California's case rate when California is lagged by one or two weeks?
-
-This question is meaningful because Nevada's economy is heavily tied to tourism, and a large share of tourists visiting Las Vegas and Reno come from California. Because of that connection, it is reasonable to ask whether large COVID-19 waves in California were associated with later increases in Nevada.
-
-## Data Source
-
-The data come from the Johns Hopkins University Center for Systems Science and Engineering (JHU CSSE) COVID-19 time series repository on GitHub. The analysis below uses the U.S. confirmed cases file and the U.S. deaths file. The deaths file is also used because it contains population counts, which allow case rates to be calculated per 100,000 residents.
-
-## Data Description
-
-The two source files are:
-
-- `time_series_covid19_confirmed_US.csv`
-- `time_series_covid19_deaths_US.csv`
-
-Each row represents a U.S. county or county-equivalent. The columns at the front of the dataset contain geographic identifiers such as county and state names. The remaining date columns contain cumulative COVID-19 counts for each day.
-
-# Load the Data
-
-```{r import-data}
-base_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
-
-confirmed_url <- paste0(base_url, "time_series_covid19_confirmed_US.csv")
-deaths_url    <- paste0(base_url, "time_series_covid19_deaths_US.csv")
-
-confirmed_us <- read_csv(confirmed_url)
-deaths_us <- read_csv(deaths_url)
+# Load CSV
+nydata <- read_csv(csv_file_path)
 ```
+# Data Tidying Step
 
-# Tidy and Merge the Data
+Here we will 'tidy' the data through formatting variables to the correct type, creating new variables, and dropping variables that won't be used in our analysis. We'll also check for missing variables but there may not be any missing data points in the columns we have selected for analysis.
 
-```{r tidy-data}
-confirmed_long <- confirmed_us %>%
-  pivot_longer(
-    cols = matches("^[0-9]{1,2}/[0-9]{1,2}/[0-9]{2}$"),
-    names_to = "date",
-    values_to = "confirmed"
-  ) %>%
-  mutate(date = mdy(date))
+```{r, tidy, dependson = c("DATA-files")}
 
-deaths_long <- deaths_us %>%
-  pivot_longer(
-    cols = matches("^[0-9]{1,2}/[0-9]{1,2}/[0-9]{2}$"),
-    names_to = "date",
-    values_to = "deaths"
-  ) %>%
-  mutate(date = mdy(date))
-```
+startmissing <- sum(is.na(nydata))
+print(paste("There are", startmissing, "missing data points in the starting data set."))
+nydata.events <- nydata %>%
 
-```{r join-data}
-covid_us_long <- confirmed_long %>%
-  left_join(
-    deaths_long %>%
-      select(Admin2, Province_State, date, Population, deaths),
-    by = c("Admin2", "Province_State", "date")
-  ) %>%
-  filter(!is.na(Population), Population > 0, !is.na(Province_State))
-```
+  # remove first set of unused columns
+  dplyr::select(-JURISDICTION_CODE, -X_COORD_CD, -Y_COORD_CD, -Lon_Lat, -LOC_OF_OCCUR_DESC, -LOC_CLASSFCTN_DESC,   -LOCATION_DESC, -PERP_AGE_GROUP, -PERP_SEX, -PERP_RACE, -BORO, -VIC_RACE, -VIC_AGE_GROUP, -VIC_SEX) %>%
 
-# Add Census Region Labels
 
-```{r add-region}
-northeast <- c("Maine", "New Hampshire", "Vermont", "Massachusetts", "Rhode Island",
-               "Connecticut", "New York", "New Jersey", "Pennsylvania", "Delaware", "Maryland", "District of Columbia", "Virginia", "West Virginia")
-midwest <- c("Ohio", "Indiana", "Illinois", "Michigan", "Wisconsin", "Minnesota",
-             "Iowa", "Missouri", "North Dakota", "South Dakota", "Nebraska", "Kansas")
-south <- c("North Carolina", "South Carolina", "Georgia", "Florida", "Kentucky",
-           "Tennessee", "Mississippi", "Alabama", "Oklahoma", "Texas", "Arkansas",
-           "Louisiana")
-west <- c("Montana", "Idaho", "Wyoming", "Colorado", "New Mexico", "Arizona", "Utah",
-          "Nevada", "Washington", "Oregon", "California", "Alaska", "Hawaii")
 
-covid_us_long <- covid_us_long %>%
+  # format and create date and time variables
   mutate(
-    region = case_when(
-      Province_State %in% northeast ~ "Northeast",
-      Province_State %in% midwest ~ "Midwest",
-      Province_State %in% south ~ "South",
-      Province_State %in% west ~ "West",
-      TRUE ~ "Other"
-    )
+          OCCUR_DATE = as.Date(as.character(OCCUR_DATE), format = "%m/%d/%Y"),
+          OCCUR_TIME = hms(OCCUR_TIME),
+          OCCUR_DATE_TIME = ymd_hm(paste(OCCUR_DATE, sprintf(
+                                                            '%02d:%02d',
+                                                            hour(OCCUR_TIME),
+                                                            minute(OCCUR_TIME)
+                                                            )
+                                        )
+          ),
+          YEAR = year(OCCUR_DATE),
+          MONTH = month(OCCUR_DATE),
+          DAY = day(OCCUR_DATE),
+          HOUR = hour(OCCUR_TIME),
+          DAY_OF_WEEK = wday(OCCUR_DATE, label = TRUE),
+          # The levels of the factor here are reversed so the weekend is on the outside of the radial graph
+          DAY_OF_WEEK = factor(DAY_OF_WEEK, levels = c("Sun", "Sat", "Fri", "Thu", "Wed", "Tue", "Mon")),
+  ) %>%
+
+  # drop the handful of rows with no latitude or longitude
+  drop_na(Latitude, Longitude) %>%
+
+  arrange(OCCUR_DATE_TIME) %>%  # Make sure it's sorted by date-time
+  distinct(INCIDENT_KEY, .keep_all = TRUE) %>%
+  mutate(
+    TIME_LAST_SHOOTING = as.numeric(difftime(OCCUR_DATE_TIME, lag(OCCUR_DATE_TIME, order_by = OCCUR_DATE_TIME, default = first(OCCUR_DATE_TIME)), units = "mins"))
   )
-```
 
-# Create Daily New Cases
-
-The Johns Hopkins data are cumulative counts. To analyze changes over time, I convert them to daily new cases by taking differences within each county.
-
-```{r daily-cases}
-covid_daily <- covid_us_long %>%
-  arrange(Province_State, Admin2, date) %>%
-  group_by(Province_State, Admin2) %>%
+nydata.murders <- nydata.events %>%
+  filter(STATISTICAL_MURDER_FLAG == TRUE) %>%
+  arrange(OCCUR_DATE_TIME) %>%
+  distinct(INCIDENT_KEY, .keep_all = TRUE) %>%
   mutate(
-    new_cases = confirmed - lag(confirmed, default = first(confirmed))
-  ) %>%
-  ungroup() %>%
-  mutate(
-    new_cases = if_else(new_cases < 0, 0, new_cases)
+    TIME_LAST_SHOOTING_MURDER = as.numeric(difftime(OCCUR_DATE_TIME, lag(OCCUR_DATE_TIME, order_by = OCCUR_DATE_TIME, default = first(OCCUR_DATE_TIME)), units = "mins"))
   )
+
+# checking for missing data points in final dataset
+totalmissing <- sum(is.na(nydata.murders))
+print(paste("There are", totalmissing, "missing data points in the final data set."))
+
 ```
+We've have no missing data points to worry about in the columns we have selected for anaylsis.  We can now begin to visually and analytically explore our data.
 
-# Aggregate to Weekly State Data
 
-I use weekly totals so that it is possible to examine one-week and two-week lag relationships between California and Nevada.
+# Visualization #1
+In this visualization we summarize the data to count the number of shooting deaths by hour and day of the week, and then create a polar plot to visualize the distribution.
+```{r, polartime}
+# Summarize the data to count the number of shootings by hour
+shootings_by_hour <- nydata.events %>%
+  group_by(DAY_OF_WEEK, HOUR) %>%
+  summarize(n = n()) %>%
+  ungroup()
 
-```{r weekly-state}
-weekly_state <- covid_daily %>%
-  mutate(week = floor_date(date, unit = "week", week_start = 1)) %>%
-  group_by(Province_State, region, week) %>%
-  summarise(
-    weekly_cases = sum(new_cases, na.rm = TRUE),
-    population = sum(Population, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  mutate(
-    case_rate_100k = weekly_cases / population * 100000
-  )
+
+# Create the polar plot with stacked bars
+ggplot(shootings_by_hour, aes(x = as.factor(HOUR), y = n, fill = DAY_OF_WEEK)) +
+  geom_bar(stat = "identity") +
+  coord_polar("x") +
+  scale_x_discrete(breaks = 0:23, labels = 0:23) +
+  ggtitle("Number of Shootings by Hour and Day of the Week") +
+  xlab("Hour of the Day") +
+  ylab("Number of Shootings") +
+  theme_minimal()
+
+
 ```
+It appears that the majority of shooting related murders take place at night between 6p and 4a.
 
-# Build California, Nevada, and U.S. Comparison Data
+# Visualization #2
+In this visualization we summarize the data to count the number of murders by precinct and create a histogram to visualize the distribution.
+```{r, linegraph}
+# Summarize the data to count the number of murders by precinct
+murders_by_precinct <- nydata.murders %>%
+  group_by(PRECINCT) %>%
+  summarize(murder_count = n()) %>%
+  ungroup()
 
-```{r ca-nv-us-data}
-ca_nv <- weekly_state %>%
-  filter(Province_State %in% c("California", "Nevada")) %>%
-  select(week, series = Province_State, case_rate_100k)
-
-us_weekly <- covid_daily %>%
-  mutate(week = floor_date(date, unit = "week", week_start = 1)) %>%
-  group_by(week) %>%
-  summarise(
-    weekly_cases = sum(new_cases, na.rm = TRUE),
-    population = sum(Population, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  mutate(
-    case_rate_100k = weekly_cases / population * 100000,
-    series = "United States"
-  ) %>%
-  select(week, series, case_rate_100k)
-
-compare_ca_nv_us <- bind_rows(ca_nv, us_weekly)
-```
-
-# Visualization 1: California, Nevada, and the National Average
-
-```{r plot-ca-nv-us, fig.width=10, fig.height=6}
-ggplot(compare_ca_nv_us, aes(x = week, y = case_rate_100k, color = series)) +
-  geom_line(linewidth = 1) +
-  labs(
-    title = "Weekly COVID-19 Case Rates: California, Nevada, and the United States",
-    subtitle = "Weekly new confirmed cases per 100,000 residents",
-    x = "Week",
-    y = "Cases per 100,000",
-    color = "Series"
-  ) +
-  scale_y_continuous(labels = comma) +
+# Create the histogram
+ggplot(murders_by_precinct, aes(x = murder_count)) +
+  geom_histogram(bins = 15, fill = "steelblue", color = "black") +
+  ggtitle("Histogram of Murder Counts by Precinct") +
+  xlab("Number of Murders") +
+  ylab("Number of Precincts") +
   theme_minimal()
 ```
 
 
-# Visualization 2: Weekly Case Rates by U.S. Census Region
+# Analysis and Modeling
 
-```{r weekly-region}
-weekly_region <- weekly_state %>%
-  filter(region != "Other") %>%
-  group_by(region, week) %>%
-  summarise(
-    weekly_cases = sum(weekly_cases, na.rm = TRUE),
-    population = sum(population, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  mutate(
-    case_rate_100k = weekly_cases / population * 100000
-  )
+Let's see if there is a correlation between day of the week and shooting murder counts using a random forest model.
+```{r}
+TOTAL_SHOOTINGS_PER_DAY <- nydata.murders %>%
+        group_by(OCCUR_DATE, DAY_OF_WEEK) %>%
+        summarize(murder_count = n()) %>%
+        ungroup()
+
+set.seed(777)
+rf_model <- randomForest(murder_count ~ DAY_OF_WEEK, data = TOTAL_SHOOTINGS_PER_DAY, importance=TRUE)
+print(rf_model)
+
+predictions <- predict(rf_model, TOTAL_SHOOTINGS_PER_DAY)
+observed <- TOTAL_SHOOTINGS_PER_DAY$murder_count
+mae_value <- mean(abs(predictions - observed))
+
+print(paste("Mean Absolute Error (MAE):", mae_value))
 ```
 
-```{r plot-region, fig.width=10, fig.height=6}
-ggplot(weekly_region, aes(x = week, y = case_rate_100k, color = region)) +
-  geom_line(linewidth = 1) +
-  labs(
-    title = "Weekly COVID-19 Case Rates by U.S. Census Region",
-    subtitle = "Weekly new confirmed cases per 100,000 residents",
-    x = "Week",
-    y = "Cases per 100,000",
-    color = "Region"
-  ) +
-  scale_y_continuous(labels = comma) +
-  theme_minimal()
-```
+# A word on Bias
 
+Potential sources of bias in this analysis of include underreporting of shootings and shootings that result in a murder. Additionally, there may be misclassified deaths where a murder is reported as a suicide or other administrative errors resulting in misreporting of data.
 
+As this analysis spans many years differences in policing policy may result in changes in reporting for some years resulting in temporal bias.
 
-# Model: Does California Lead Nevada?
-
-To explore whether California's case rate is associated with Nevada's case rate later on, I create a weekly state-level dataset for the two states, then lag California by one week and two weeks.
-
-```{r lag-model-data}
-ca_weekly <- weekly_state %>%
-  filter(Province_State == "California") %>%
-  select(week, ca_rate = case_rate_100k)
-
-nv_weekly <- weekly_state %>%
-  filter(Province_State == "Nevada") %>%
-  select(week, nv_rate = case_rate_100k)
-
-lag_df <- nv_weekly %>%
-  left_join(ca_weekly, by = "week") %>%
-  arrange(week) %>%
-  mutate(
-    ca_rate_lag1 = lag(ca_rate, 1),
-    ca_rate_lag2 = lag(ca_rate, 2)
-  ) %>%
-  filter(!is.na(ca_rate_lag1), !is.na(ca_rate_lag2))
-```
-
-## Correlations
-
-```{r correlations}
-cor_lag1 <- cor(lag_df$nv_rate, lag_df$ca_rate_lag1, use = "complete.obs")
-cor_lag2 <- cor(lag_df$nv_rate, lag_df$ca_rate_lag2, use = "complete.obs")
-
-tibble(
-  lag = c("California lagged 1 week", "California lagged 2 weeks"),
-  correlation_with_nevada = c(cor_lag1, cor_lag2)
-)
-```
-
-## Linear Model
-
-```{r model}
-lag_model <- lm(nv_rate ~ ca_rate_lag1 + ca_rate_lag2, data = lag_df)
-summary(lag_model)
-tidy(lag_model)
-```
-
-## Model Interpretation
-
-The results show that there is a correlation between the Nevada weekly case rate and the California weekly case rate lagged by one week. The coefficient for `ca_rate_lag1` indicates that for each additional case per 100,000 in California one week prior, Nevada's case rate increases by approximately 1.05, holding the two-week lag constant.
-
-# Visualization for the Model
-
-```{r model-scatter, fig.width=10, fig.height=6}
-ggplot(lag_df, aes(x = ca_rate_lag1, y = nv_rate)) +
-  geom_point(alpha = 0.6, color = "steelblue") +
-  geom_smooth(method = "lm", se = FALSE, color = "darkred") +
-  labs(
-    title = "Nevada Weekly Case Rate vs California Weekly Case Rate Lagged 1 Week",
-    x = "California weekly cases per 100,000 (lagged 1 week)",
-    y = "Nevada weekly cases per 100,000"
-  ) +
-  theme_minimal()
-```
-
-# Bias and Limitations
-
-There are several possible sources of bias and limitation in this analysis.
-
-First, reported case counts are not the same as true infections. Many cases were never diagnosed, especially early in the pandemic when testing was less available.
-
-Second, testing access and reporting practices differed across states and counties. That means differences in measured case rates may partly reflect differences in detection rather than only differences in disease spread.
-
-Third, this analysis assumes that California tourism flows could contribute to Nevada exposure, but the data here do not directly measure travel behavior. The link between California and Nevada is a reasonable hypothesis, but the model does not directly prove that tourists caused later increases in Nevada cases.
-
-Fourth, weekly case rates in California and Nevada may both be driven by other factors at the same time, such as national surges, seasonal effects, new variants, public policy changes, or changing testing practices. Because of that, correlation should not be interpreted as causation.
-
-Finally, the Johns Hopkins repository was created for public health tracking, not specifically for causal modeling. It is very useful for descriptive analysis, but it has limitations for making strong causal claims.
-
-# Conclusion
-
-This report used the Johns Hopkins CSSE U.S. COVID-19 time series data to examine case trends with a focus on California, Nevada, and the broader U.S. pattern. The first visualization compared weekly case rates in California, Nevada, and the United States. The second compared weekly case rates across the four Census regions. Together, these figures showed that COVID-19 waves varied over time both nationally and regionally.
-
-The modeling section then demonstrated that Nevada's weekly case rate was associated with California's weekly case rate lagged by one and two weeks. This provides a simple way to explore whether the two states moved together over time with a short delay. While the model cannot prove a tourism-based causal relationship, it does give a reasonable and interpretable starting point for exploring that possibility.
-
+One form of bias is confirmation bias where one tend to search for information that confirms one's preconceptions.  To mitigate this, actively seek out and consider data or viewpoints that challenge your existing beliefs.
