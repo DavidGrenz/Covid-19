@@ -1,10 +1,10 @@
 ---
 title: "COVID-19 Case Trends in California, Nevada, and the United States"
-author: "David Grenz"
-date: "04/18/2026"
+author: "Your Name"
+date: "`r Sys.Date()`"
 output:
+
   html_document: default
-  pdf_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -181,9 +181,6 @@ ggplot(compare_ca_nv_us, aes(x = week, y = case_rate_100k, color = series)) +
   theme_minimal()
 ```
 
-## Interpretation
-
-This visualization compares weekly COVID-19 case rates in California, Nevada, and the United States overall. It helps show whether Nevada tracked more closely with California than with the broader national pattern. If the two state lines tend to rise and fall together, that would support the idea that outbreaks in the two states were connected or at least exposed to some similar regional forces.
 
 # Visualization 2: Weekly Case Rates by U.S. Census Region
 
@@ -215,9 +212,7 @@ ggplot(weekly_region, aes(x = week, y = case_rate_100k, color = region)) +
   theme_minimal()
 ```
 
-## Interpretation
 
-This figure compares the four major Census regions: Northeast, Midwest, South, and West. The regional trends make it easier to see how COVID-19 waves shifted geographically over time. A national summary alone would hide many of these differences.
 
 # Model: Does California Lead Nevada?
 
@@ -264,7 +259,7 @@ tidy(lag_model)
 
 ## Model Interpretation
 
-This model tests whether Nevada's weekly case rate is associated with California's weekly case rate one week earlier and two weeks earlier. A positive coefficient would suggest that higher case activity in California tended to be followed by higher case activity in Nevada. This does not prove causation, but it is a useful way to measure whether the two states moved together over time with a delay.
+The results show that there is a correlation between the Nevada weekly case rate and the California weekly case rate lagged by one week. The coefficient for `ca_rate_lag1` indicates that for each additional case per 100,000 in California one week prior, Nevada's case rate increases by approximately 1.05, holding the two-week lag constant.
 
 # Visualization for the Model
 
@@ -298,5 +293,5 @@ Finally, the Johns Hopkins repository was created for public health tracking, no
 
 This report used the Johns Hopkins CSSE U.S. COVID-19 time series data to examine case trends with a focus on California, Nevada, and the broader U.S. pattern. The first visualization compared weekly case rates in California, Nevada, and the United States. The second compared weekly case rates across the four Census regions. Together, these figures showed that COVID-19 waves varied over time both nationally and regionally.
 
-The modeling section then tested whether Nevada's weekly case rate was associated with California's weekly case rate lagged by one and two weeks. This provides a simple way to explore whether the two states moved together over time with a short delay. While the model cannot prove a tourism-based causal relationship, it does give a reasonable and interpretable starting point for exploring that possibility.
+The modeling section then demonstrated that Nevada's weekly case rate was associated with California's weekly case rate lagged by one and two weeks. This provides a simple way to explore whether the two states moved together over time with a short delay. While the model cannot prove a tourism-based causal relationship, it does give a reasonable and interpretable starting point for exploring that possibility.
 
